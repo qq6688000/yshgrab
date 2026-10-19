@@ -1,0 +1,63 @@
+name: Build YSHGrab
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" || true
+          if [ ! -d "$HOME/theos" ]; then
+            brew install ldid perl rsync
+            git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          fi
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: Download iOS SDK
+        run: |
+          if [ -z "$(ls "$THEOS"/sdks/*.sdk 2>/dev/null)" ]; then
+            git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks 2>/dev/null || true
+            cp -a /tmp/sdks/iPhoneOS*.sdk "$THEOS/sdks/" 2>/dev/null || true
+            rm -rf /tmp/sdks
+          fi
+          echo "Available SDKs:"
+          ls "$THEOS/sdks/"
+
+      - name: Verify Xcode clang
+        run: |
+          xcrun --find clang
+          clang --version | head -2
+          echo "=== arm64e PAC stubs test ==="
+          echo '@import Foundation; void t(){NSObject*o=[NSObject new];[o description];}' | \
+            xcrun clang -x objective-c -target arm64e-apple-ios15.0 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) -fobjc-arc -c -o /tmp/t.o - 2>/dev/null && \
+            otool -tv /tmp/t.o | grep -c paciza && echo "paciza found ✓" || echo "no paciza (may need different approach)"
+
+      - name: Build package
+        run: |
+          chmod +x build_package.sh postinst yshgrab
+          bash build_package.sh
+
+      - name: Verify dylib
+        run: |
+          DEB=$(ls packages/*.deb | head -1)
+          TMP=$(mktemp -d)
+          dpkg-deb -x "$DEB" "$TMP"
+          DYLIB="$TMP/var/jb/Library/MobileSubstrate/DynamicLibraries/YSHGrab.dylib"
+          echo "=== dylib arch ==="
+          lipo -info "$DYLIB"
+          echo "=== paciza count (should be >0) ==="
+          otool -tv "$DYLIB" | grep -c paciza || echo "0 paciza!"
+          echo "=== cryptid ==="
+          otool -l "$DYLIB" | grep cryptid | head -2
+          rm -rf "$TMP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YSHGrab-deb
+          path: packages/*.deb

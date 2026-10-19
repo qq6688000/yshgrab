@@ -1,0 +1,24 @@
+#!/bin/sh
+# YSHGrab 安装后处理（注入方式对齐 XLHVideoGrab 1.4.0）
+
+JB=/var/jb
+[ -d "$JB" ] || JB=""
+
+# 1) 可执行权限（部分文件系统打包时会丢执行位）
+chmod 755 "$JB/usr/bin/yshgrab" 2>/dev/null || true
+chmod 755 /usr/bin/yshgrab 2>/dev/null || true
+
+# 2) 确保 ElleKit / TweakInject 目录能看到本插件
+DYLIB="$JB/Library/MobileSubstrate/DynamicLibraries/YSHGrab.dylib"
+PLIST="$JB/Library/MobileSubstrate/DynamicLibraries/YSHGrab.plist"
+TI="$JB/usr/lib/TweakInject"
+if [ -d "$TI" ] && [ -f "$DYLIB" ] && [ ! -e "$TI/YSHGrab.dylib" ]; then
+    ln -sf "$DYLIB" "$TI/YSHGrab.dylib" 2>/dev/null || true
+    ln -sf "$PLIST" "$TI/YSHGrab.plist" 2>/dev/null || true
+fi
+
+# 3) 配置目录
+mkdir -p /var/mobile/Library/Preferences/yshgrab 2>/dev/null || true
+chown mobile:mobile /var/mobile/Library/Preferences/yshgrab 2>/dev/null || true
+
+exit 0

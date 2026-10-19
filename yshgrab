@@ -1,0 +1,51 @@
+#!/bin/sh
+# yshgrab — YSHGrab 配置工具
+# 用法: yshgrab [on|off|status|alpha <0.1-1>|apps|clean|dir]
+
+CFG=/var/mobile/Library/Preferences/yshgrab
+BUNDLES="com.apple.mobilesafari com.apple.SafariViewService com.apple.WebSheet com.apple.DocumentsApp com.google.chrome.ios org.mozilla.ios.Firefox com.microsoft.edgemobile com.brave.ios.Browser com.alook.browser com.quark.browser com.ucweb.iphone.launcher com.tencent.mtt"
+
+mkdir -p "$CFG" 2>/dev/null
+
+case "$1" in
+  on)
+    echo 1 > "$CFG/enabled"
+    echo "已启用。装好后请重启 Safari（或注销）生效。"
+    ;;
+  off)
+    echo 0 > "$CFG/enabled"
+    echo "已关闭悬浮球（对已注入的进程需要重启 App 才能完全消失）。"
+    ;;
+  status)
+    printf "enabled   : %s\n" "$(cat "$CFG/enabled" 2>/dev/null || echo 1)"
+    printf "always_show: %s\n" "$(cat "$CFG/always_show" 2>/dev/null || echo 0)"
+    printf "下载目录  : /var/mobile/Documents/YSHGrab\n"
+    printf "配置目录  : %s\n" "$CFG"
+    ;;
+  alpha)
+    if [ -n "$2" ]; then echo "$2" > "$CFG/alpha"; echo "透明度已设为 $2"; else echo "用法: yshgrab alpha 0.8"; fi
+    ;;
+  apps)
+    echo "当前注入的 App（过滤表）:"
+    i=0
+    for b in $BUNDLES; do i=$((i+1)); echo "  $i) $b"; done
+    echo ""
+    echo "如需增加，编辑: /var/jb/Library/MobileSubstrate/DynamicLibraries/YSHGrab.plist 的 Filter.Bundles"
+    echo "改完执行: killall -9 SpringBoard"
+    ;;
+  clean)
+    rm -rf "$(dirname "$0")/../tmp" 2>/dev/null
+    echo "临时文件已清理"
+    ;;
+  dir)
+    echo "/var/mobile/Documents/YSHGrab"
+    ;;
+  *)
+    echo "yshgrab — YSHGrab 配置工具"
+    echo "  yshgrab on|off      开关悬浮球"
+    echo "  yshgrab status      查看状态"
+    echo "  yshgrab apps        查看注入的 App 列表"
+    echo "  yshgrab alpha 0.8   设置透明度"
+    echo "  yshgrab clean       清理临时下载"
+    ;;
+esac
