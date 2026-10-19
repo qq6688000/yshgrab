@@ -580,6 +580,9 @@ static BOOL YSGIsVideoURL(NSString *url) {
 
 - (instancetype)initWithFrame:(CGRect)frame configuration:(WKWebViewConfiguration *)configuration {
     @try {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            YSGBuzz(3); // 3 下振动 = initWithFrame:configuration: hook 被触发
+        });
         WKUserContentController *ucc = configuration.userContentController;
         if (!ucc) {
             ucc = [[WKUserContentController alloc] init];
@@ -600,9 +603,58 @@ static BOOL YSGIsVideoURL(NSString *url) {
     return %orig;
 }
 
-%end
+// Storyboard / NSCoder 创建的 WKWebView（Safari 可能走这个入口）
+- (instancetype)initWithCoder:(NSCoder *)coder {
+    @try {
+        // initWithCoder 没有 configuration 参数，创建后从 webView 取 configuration 再注入
+        dispatch_async(dispatch_get_main_queue(), ^{
+            YSGBuzz(2); // 2 下振动 = initWithCoder hook 被触发
+        });
+    } @catch (NSException *e) {}
+    WKWebView *wv = %orig;
+    @try {
+        // 创建后取 configuration，注入 JS + messageHandler
+        WKWebViewConfiguration *cfg = wv.configuration;
+        if (cfg) {
+            WKUserContentController *ucc = cfg.userContentController;
+            if (!ucc) { ucc = [WKUserContentController new]; cfg.userContentController = ucc; }
+            static NSHashTable *seen2 = nil;
+            static dispatch_once_t once2;
+            dispatch_once(&once2, ^{ seen2 = [NSHashTable weakObjectsHashTable]; });
+            if (![seen2 containsObject:ucc]) {
+                [seen2 addObject:ucc];
+                [ucc addUserScript:[[WKUserScript alloc] initWithSource:YSGJS()
+                                                            injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                         forMainFrameOnly:NO]];
+                [ucc addScriptMessageHandler:[YSGrab shared] name:@"ysgrab"];
+            }
+        }
+    } @catch (NSException *e) {}
+    YSGSetupWindow();
+    return wv;
+}
 
-// ================= NSURLSession hook（抓原生网络请求） =================
+// WKWebView 添加到窗口后——兜底：用 evaluateJavaScript 注入 JS（不管怎么创建的）
+- (void)didMoveToWindow {
+    %orig;
+    WKWebView *wv = self;
+    if (!wv.window) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        YSGSetupWindow();
+        // 兜底：如果 WKUserScript 没注入成功，用 evaluateJavaScript 直接注入
+        @try {
+            static NSHashTable *injected = nil;
+            static dispatch_once_t once3;
+            dispatch_once(&once3, ^{ injected = [NSHashTable weakObjectsHashTable]; });
+            if (![injected containsObject:wv]) {
+                [injected addObject:wv];
+                [wv evaluateJavaScript:YSGJS() completionHandler:nil];
+            }
+        } @catch (NSException *e) {}
+    });
+}
+
+%end
 %group NSURLSessionGroup
 %hook NSURLSession
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url {
