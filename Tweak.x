@@ -619,6 +619,28 @@ static BOOL YSGIsVideoURL(NSString *url) {
 }
 
 // ================= Hook =================
+
+// hook WKUserContentController init：UCC 创建时自动注入 JS + messageHandler
+// 这样不管 WKWebView 走 initWithFrame 还是 initWithCoder，JS 都会被注入
+%hook WKUserContentController
+- (instancetype)init {
+    WKUserContentController *ucc = %orig;
+    @try {
+        static NSHashTable *seen = nil;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ seen = [NSHashTable weakObjectsHashTable]; });
+        if (![seen containsObject:ucc]) {
+            [seen addObject:ucc];
+            [ucc addUserScript:[[WKUserScript alloc] initWithSource:YSGJS()
+                                                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                     forMainFrameOnly:NO]];
+            [ucc addScriptMessageHandler:[YSGrab shared] name:@"ysgrab"];
+        }
+    } @catch (NSException *e) {}
+    return ucc;
+}
+%end
+
 %hook WKWebView
 
 - (instancetype)initWithFrame:(CGRect)frame configuration:(WKWebViewConfiguration *)configuration {
