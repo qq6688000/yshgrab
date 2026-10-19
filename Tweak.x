@@ -93,6 +93,51 @@ static void YSGAddLink(NSString *url, NSString *type) {
     });
 }
 
+// ================= WKWebView 追踪（URL 变化时注入 JS） =================
+static char kYSGObsKey;
+static char kYSGTrackedKey;
+
+// 用 observer 监听 WKWebView URL 变化，每次变化延迟注入 JS
+@interface YSGURLObserver : NSObject
+@property (nonatomic, weak) WKWebView *webView;
+@end
+@implementation YSGURLObserver
+- (void)observeValue:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
+    if ([keyPath isEqualToString:@"URL"]) {
+        WKWebView *wv = self.webView;
+        if (!wv) return;
+        // 延迟注入：等页面开始加载
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                [wv evaluateJavaScript:YSGJS() completionHandler:nil];
+            } @catch (NSException *e) {}
+        });
+        // 再延迟一次：等 DOM 基本就绪
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                [wv evaluateJavaScript:YSGJS() completionHandler:nil];
+            } @catch (NSException *e) {}
+        });
+    }
+}
+@end
+
+static void YSGTrackWebView(WKWebView *wv) {
+    if (!wv) return;
+    @try {
+        if (objc_getAssociatedObject(wv, &kYSGTrackedKey)) return;
+        objc_setAssociatedObject(wv, &kYSGTrackedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        YSGURLObserver *obs = [YSGURLObserver new];
+        obs.webView = wv;
+        objc_setAssociatedObject(wv, &kYSGObsKey, obs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [wv addObserver:obs forKeyPath:@"URL" options:NSKeyValueObservingOptionNew context:nil];
+        // 立即注入一次（当前页面）
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try { [wv evaluateJavaScript:YSGJS() completionHandler:nil]; } @catch (NSException *e) {}
+        });
+    } @catch (NSException *e) {}
+}
+
 // ================= 悬浮球 =================
 @interface YSGBall : UIView
 @end
@@ -580,9 +625,6 @@ static BOOL YSGIsVideoURL(NSString *url) {
 
 - (instancetype)initWithFrame:(CGRect)frame configuration:(WKWebViewConfiguration *)configuration {
     @try {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            YSGBuzz(3); // 3 下振动 = initWithFrame:configuration: hook 被触发
-        });
         WKUserContentController *ucc = configuration.userContentController;
         if (!ucc) {
             ucc = [[WKUserContentController alloc] init];
@@ -600,20 +642,16 @@ static BOOL YSGIsVideoURL(NSString *url) {
         }
     } @catch (NSException *e) {}
     YSGSetupWindow();
-    return %orig;
+    WKWebView *result = %orig;
+    YSGTrackWebView(result);
+    return result;
 }
 
 // Storyboard / NSCoder 创建的 WKWebView（Safari 可能走这个入口）
 - (instancetype)initWithCoder:(NSCoder *)coder {
-    @try {
-        // initWithCoder 没有 configuration 参数，创建后从 webView 取 configuration 再注入
-        dispatch_async(dispatch_get_main_queue(), ^{
-            YSGBuzz(2); // 2 下振动 = initWithCoder hook 被触发
-        });
-    } @catch (NSException *e) {}
     WKWebView *wv = %orig;
     @try {
-        // 创建后取 configuration，注入 JS + messageHandler
+        // 创建后取 configuration，注入 JS + messageHandler（configuration 是 copy，但 ucc 可改）
         WKWebViewConfiguration *cfg = wv.configuration;
         if (cfg) {
             WKUserContentController *ucc = cfg.userContentController;
@@ -629,29 +667,38 @@ static BOOL YSGIsVideoURL(NSString *url) {
                 [ucc addScriptMessageHandler:[YSGrab shared] name:@"ysgrab"];
             }
         }
+        // 注册导航回调：每次页面加载完成后用 evaluateJavaScript 兜底注入
+        YSGTrackWebView(wv);
     } @catch (NSException *e) {}
     YSGSetupWindow();
     return wv;
 }
 
-// WKWebView 添加到窗口后——兜底：用 evaluateJavaScript 注入 JS（不管怎么创建的）
+// WKWebView 添加到窗口后——兜底挂载悬浮球
 - (void)didMoveToWindow {
     %orig;
     WKWebView *wv = self;
     if (!wv.window) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         YSGSetupWindow();
-        // 兜底：如果 WKUserScript 没注入成功，用 evaluateJavaScript 直接注入
-        @try {
-            static NSHashTable *injected = nil;
-            static dispatch_once_t once3;
-            dispatch_once(&once3, ^{ injected = [NSHashTable weakObjectsHashTable]; });
-            if (![injected containsObject:wv]) {
-                [injected addObject:wv];
-                [wv evaluateJavaScript:YSGJS() completionHandler:nil];
-            }
-        } @catch (NSException *e) {}
+        YSGTrackWebView(wv);
     });
+}
+
+// 页面加载完成后注入 JS（不管 WKWebView 怎么创建的，每次导航都注入）
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    %orig;
+    @try {
+        [webView evaluateJavaScript:YSGJS() completionHandler:nil];
+    } @catch (NSException *e) {}
+}
+
+// 开始加载时也注入（documentStart 效果）
+- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+    %orig;
+    @try {
+        [webView evaluateJavaScript:YSGJS() completionHandler:nil];
+    } @catch (NSException *e) {}
 }
 
 %end
