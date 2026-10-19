@@ -93,49 +93,6 @@ static void YSGAddLink(NSString *url, NSString *type) {
     });
 }
 
-// ================= WKWebView 追踪（定时器注入 JS） =================
-static char kYSGTrackedKey;
-static NSMutableArray *gTrackedWebViews = nil;
-
-static void YSGTrackWebView(WKWebView *wv) {
-    if (!wv) return;
-    @try {
-        if (objc_getAssociatedObject(wv, &kYSGTrackedKey)) return;
-        objc_setAssociatedObject(wv, &kYSGTrackedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        @synchronized (gTrackedWebViews) {
-            if (!gTrackedWebViews) gTrackedWebViews = [NSMutableArray new];
-            [gTrackedWebViews addObject:wv];
-        }
-        // 立即注入一次
-        dispatch_async(dispatch_get_main_queue(), ^{
-            @try { [wv evaluateJavaScript:YSGJS() completionHandler:nil]; } @catch (NSException *e) {}
-        });
-    } @catch (NSException *e) {}
-}
-
-// 定时器：每 1.5 秒对所有已追踪的 WKWebView 注入 JS
-static void YSGStartJSTimer(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *t) {
-                @try {
-                    NSArray *snap;
-                    @synchronized (gTrackedWebViews) {
-                        snap = [gTrackedWebViews copy];
-                    }
-                    for (WKWebView *wv in snap) {
-                        @try {
-                            [wv evaluateJavaScript:YSGJS() completionHandler:nil];
-                        } @catch (NSException *e) {}
-                    }
-                } @catch (NSException *e) {}
-            }];
-            [[NSRunLoop currentRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
-        });
-    });
-}
-
 // ================= 悬浮球 =================
 @interface YSGBall : UIView
 @end
@@ -621,7 +578,7 @@ static BOOL YSGIsVideoURL(NSString *url) {
 // ================= Hook =================
 
 // hook WKUserContentController init：UCC 创建时自动注入 JS + messageHandler
-// 这样不管 WKWebView 走 initWithFrame 还是 initWithCoder，JS 都会被注入
+// 解决 Safari initWithCoder 创建的 WKWebView messageHandler 没注册的问题
 %hook WKUserContentController
 - (instancetype)init {
     WKUserContentController *ucc = %orig;
@@ -662,50 +619,12 @@ static BOOL YSGIsVideoURL(NSString *url) {
         }
     } @catch (NSException *e) {}
     YSGSetupWindow();
-    WKWebView *result = %orig;
-    YSGTrackWebView(result);
-    return result;
-}
-
-// Storyboard / NSCoder 创建的 WKWebView（Safari 可能走这个入口）
-- (instancetype)initWithCoder:(NSCoder *)coder {
-    WKWebView *wv = %orig;
-    @try {
-        // 创建后取 configuration，注入 JS + messageHandler（configuration 是 copy，但 ucc 可改）
-        WKWebViewConfiguration *cfg = wv.configuration;
-        if (cfg) {
-            WKUserContentController *ucc = cfg.userContentController;
-            if (!ucc) { ucc = [WKUserContentController new]; cfg.userContentController = ucc; }
-            static NSHashTable *seen2 = nil;
-            static dispatch_once_t once2;
-            dispatch_once(&once2, ^{ seen2 = [NSHashTable weakObjectsHashTable]; });
-            if (![seen2 containsObject:ucc]) {
-                [seen2 addObject:ucc];
-                [ucc addUserScript:[[WKUserScript alloc] initWithSource:YSGJS()
-                                                            injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                                         forMainFrameOnly:NO]];
-                [ucc addScriptMessageHandler:[YSGrab shared] name:@"ysgrab"];
-            }
-        }
-        // 注册导航回调：每次页面加载完成后用 evaluateJavaScript 兜底注入
-        YSGTrackWebView(wv);
-    } @catch (NSException *e) {}
-    YSGSetupWindow();
-    return wv;
-}
-
-// WKWebView 添加到窗口后——挂悬浮球 + 追踪
-- (void)didMoveToWindow {
-    %orig;
-    WKWebView *wv = self;
-    if (!wv.window) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        YSGSetupWindow();
-        YSGTrackWebView(wv);
-    });
+    return %orig;
 }
 
 %end
+
+// ================= NSURLSession hook（抓原生网络请求） =================
 %group NSURLSessionGroup
 %hook NSURLSession
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url {
@@ -767,7 +686,6 @@ static BOOL YSGIsVideoURL(NSString *url) {
         YSGBuzz(1); // 1 下振动 = 插件已注入
         YSGSetupWindow();
         YSGPollSetup(0.5, 20); // 0.5s 轮询 ×20 次（共 10s）确保出球
-        YSGStartJSTimer(); // 启动定时器：每 1.5s 对所有 WKWebView 注入 JS
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
