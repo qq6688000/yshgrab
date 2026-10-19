@@ -57,6 +57,12 @@ jobs:
           lipo -info "$DYLIB"
           echo "=== paciza count (should be >0) ==="
           otool -tv "$DYLIB" | grep -c paciza || echo "0 paciza!"
+          echo "=== substrate dep (should be @rpath/) ==="
+          otool -L "$DYLIB" | grep -i substrate
+          echo "=== LC_RPATH count (should be 4) ==="
+          otool -l "$DYLIB" | grep -c LC_RPATH
+          echo "=== install_name (should be @rpath/) ==="
+          otool -D "$DYLIB"
           echo "=== cryptid ==="
           otool -l "$DYLIB" | grep cryptid | head -2
           rm -rf "$TMP"

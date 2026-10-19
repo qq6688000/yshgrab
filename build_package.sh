@@ -11,9 +11,30 @@ DYLIB=$(find .theos/obj -name "YSHGrab.dylib" 2>/dev/null | head -1)
 [ -z "$DYLIB" ] && { echo "ERROR: dylib not found"; find .theos/obj -name "*.dylib" 2>/dev/null; exit 1; }
 echo "Using dylib: $DYLIB"
 echo "=== dylib arch ==="
-lipo -info "$DYLIB" 2>/dev/null || otool -l "$DYLIB" | grep -A2 "Fat" || true
+lipo -info "$DYLIB" 2>/dev/null || true
 
-# 3. 生成 binary plist (30 bundles)
+# 3. 修复 load commands（对齐参考 1.4.0 的 rootless 注入方式）
+# a) CydiaSubstrate 依赖: 绝对路径 → @rpath（rootless 下 /Library/Frameworks/ 不存在）
+echo "=== 修复 CydiaSubstrate 依赖路径 ==="
+otool -L "$DYLIB" | grep -i substrate
+# 对 fat binary 直接操作，install_name_tool 会自动处理所有切片
+install_name_tool \
+  -change /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate @rpath/CydiaSubstrate.framework/CydiaSubstrate \
+  -change @rpath/CydiaSubstrate.framework/CydiaSubstrate @rpath/CydiaSubstrate.framework/CydiaSubstrate \
+  "$DYLIB" 2>/dev/null || true
+
+# b) install_name: 绝对路径 → @rpath
+install_name_tool -id @rpath/YSHGrab.dylib "$DYLIB" 2>/dev/null || true
+
+# c) 重新签名（install_name_tool 会破坏签名）
+ldid -S "$DYLIB" 2>/dev/null || codesign -f -s - "$DYLIB" 2>/dev/null || true
+
+echo "=== 修复后依赖 ==="
+otool -L "$DYLIB" | head -15
+echo "=== 修复后 rpath ==="
+otool -l "$DYLIB" | grep -A2 LC_RPATH
+
+# 4. 生成 binary plist (30 bundles)
 python3 -c "
 import plistlib
 bundles = ['com.apple.mobilesafari','com.apple.SafariViewService','com.apple.WebSheet','com.apple.DocumentsApp','com.google.chrome.ios','org.mozilla.ios.Firefox','com.microsoft.edgemobile','com.brave.ios.Browser','com.alook.browser','com.quark.browser','com.ucweb.iphone.launcher','com.tencent.mtt','com.operasoftware.Opera','com.duckduckgo.mobile.ios','com.ss.iphone.ugc.Aweme','com.ss.iphone.ugc.Ame','com.zhiliaoapp.musically','com.dragon.read','com.jiangjia.gif','com.kuaishou.nebula','com.xingin.discover','com.sina.weibo','com.zhihu.ios','com.tencent.xin','com.tencent.mqq','tv.danmaku.bilianime','com.google.ios.youtube','com.tencent.live4iphone','com.iqiyi.iphone','com.youku.YouKu']
@@ -21,7 +42,7 @@ plistlib.dump({'Filter':{'Bundles':bundles}}, open('YSHGrab.plist','wb'), fmt=pl
 print('plist generated:', len(bundles), 'bundles')
 "
 
-# 4. 手动 staging + 打包
+# 5. 手动 staging + 打包
 ST=$(mktemp -d)
 mkdir -p "$ST/DEBIAN"
 mkdir -p "$ST/var/jb/Library/MobileSubstrate/DynamicLibraries"
@@ -50,6 +71,12 @@ echo "=== paciza count (arm64e PAC stubs, should be >0) ==="
 otool -tv "$DYLIB2" 2>/dev/null | grep -c paciza || echo "0 paciza"
 echo "=== pacibsp count ==="
 otool -tv "$DYLIB2" 2>/dev/null | grep -c pacibsp || echo "0 pacibsp"
+echo "=== substrate 依赖路径 (应为 @rpath/) ==="
+otool -L "$DYLIB2" 2>/dev/null | grep -i substrate
+echo "=== LC_RPATH (应有4个) ==="
+otool -l "$DYLIB2" 2>/dev/null | grep -A2 LC_RPATH
+echo "=== install_name (应为 @rpath/) ==="
+otool -D "$DYLIB2" 2>/dev/null
 echo "=== cryptid ==="
 otool -l "$DYLIB2" 2>/dev/null | grep cryptid | head -2
 rm -rf "$TMPV"
