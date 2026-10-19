@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
+#import "YSGScript.h"
 
 // ================= 全局状态 =================
 static NSMutableArray<NSDictionary *> *gLinks;
@@ -52,34 +53,8 @@ static NSString *YSGFormat(NSString *fmt, ...) {
 }
 
 // ================= 注入到网页里的 JS =================
-static NSString *YSGJS(void) {
-    return
-    @"(function(){"
-    @"if(window.__ysg_installed)return;window.__ysg_installed=1;"
-    @"var seen={};"
-    // 宽松匹配——视频后缀或关键词
-    @"function ok(u){if(!u||!/^https?:/i.test(u))return false;var s=u.toLowerCase();if(/\\.(m3u8|mp4|flv|ts|mpd|webm|mov|m4s|mkv|m4a|aac)(\\?|#|$)/i.test(s))return true;if(/m3u8|hls|dash|stream|playlist|manifest|segment|chunk|video|media|play|vod|mpd|ispayload/i.test(s))return true;return false;}"
-    // 视频元素：不过滤直接报（blob: 也报）
-    @"function repMedia(u,t){try{if(!u||seen[u])return;seen[u]=1;window.webkit.messageHandlers.ysgrab.postMessage({url:u,type:t||'media'});}catch(e){}}"
-    // fetch/XHR 的 URL：宽松过滤
-    @"function rep(u,t){try{if(!u||seen[u])return;if(!ok(u))return;seen[u]=1;window.webkit.messageHandlers.ysgrab.postMessage({url:u,type:t||''});}catch(e){}}"
-    // 扫描 video/audio/iframe/embed
-    @"function scan(){try{var vs=document.querySelectorAll('video,source,audio,iframe,embed');for(var i=0;i<vs.length;i++){var v=vs[i];var s=v.currentSrc||v.src||v.getAttribute('src')||'';if(s)repMedia(s,v.tagName);}}catch(e){}}"
-    // Performance entries
-    @"try{performance.getEntriesByType('resource').forEach(function(e){rep(e.name,'perf');});}catch(e){}"
-    // fetch + response Content-Type 检查
-    @"var of=window.fetch;if(of){window.fetch=function(){try{var a=arguments[0];var url=typeof a==='string'?a:(a&&a.url);if(url)rep(url,'fetch');}catch(e){}var p=of.apply(this,arguments);try{if(p&&p.then){p.then(function(r){try{var ct=(r.headers.get('content-type')||'').toLowerCase();if(/video|mpegurl|mp2t|mp4|x-mpegurl|octet-stream/i.test(ct)){var u=r.url||url;if(u&&!seen[u]){seen[u]=1;window.webkit.messageHandlers.ysgrab.postMessage({url:u,type:'fetch-video'});}}}}catch(e){}}).catch(function(){});}}catch(e){}return p;};}"
-    // XHR + response Content-Type 检查
-    @"var op=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{rep(u,'xhr');}catch(e){}var self=this;var xu=u;this.addEventListener('load',function(){try{var ct=(self.getResponseHeader('content-type')||'').toLowerCase();if(/video|mpegurl|mp2t|mp4|x-mpegurl|octet-stream/i.test(ct)){var u2=self.responseURL||xu;if(u2&&!seen[u2]){seen[u2]=1;window.webkit.messageHandlers.ysgrab.postMessage({url:u2,type:'xhr-video'});}}}catch(e){}});return op.apply(this,arguments);};"
-    // HTMLMediaElement.src setter
-    @"try{var d=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'src');if(d&&d.set){Object.defineProperty(HTMLMediaElement.prototype,'src',{set:function(v){try{repMedia(v,'media-src');}catch(e){}d.set.call(this,v);},get:d.get});}}catch(e){}"
-    // HTMLMediaElement.load
-    @"try{var ol=HTMLMediaElement.prototype.load;HTMLMediaElement.prototype.load=function(){try{repMedia(this.currentSrc||this.src,'media-load');}catch(e){}return ol.apply(this,arguments);};}catch(e){}"
-    // MutationObserver
-    @"try{new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});}catch(e){}"
-    @"setInterval(scan,1500);scan();"
-    @"})();";
-}
+static NSString *YSGJS(void) { return YSGScriptSource(); }
+
 
 // ================= 数据 =================
 static void YSGAddLink(NSString *url, NSString *type) {
@@ -575,6 +550,24 @@ static BOOL YSGIsVideoURL(NSString *url) {
     return NO;
 }
 
+// 统一的注入入口：同一个 UCC 只注入一次，避免重复 addScriptMessageHandler 抛异常
+static void YSGInjectIntoUCC(WKUserContentController *ucc) {
+    if (!ucc) return;
+    static NSHashTable *seen = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ seen = [NSHashTable weakObjectsHashTable]; });
+    if ([seen containsObject:ucc]) return;
+    [seen addObject:ucc];
+    @try {
+        [ucc addUserScript:[[WKUserScript alloc] initWithSource:YSGJS()
+                                                    injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                 forMainFrameOnly:NO]];
+    } @catch (NSException *e) {}
+    @try {
+        [ucc addScriptMessageHandler:[YSGrab shared] name:@"ysgrab"];
+    } @catch (NSException *e) {}
+}
+
 // ================= Hook =================
 
 // hook WKUserContentController init：UCC 创建时自动注入 JS + messageHandler
@@ -582,18 +575,7 @@ static BOOL YSGIsVideoURL(NSString *url) {
 %hook WKUserContentController
 - (instancetype)init {
     WKUserContentController *ucc = %orig;
-    @try {
-        static NSHashTable *seen = nil;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ seen = [NSHashTable weakObjectsHashTable]; });
-        if (![seen containsObject:ucc]) {
-            [seen addObject:ucc];
-            [ucc addUserScript:[[WKUserScript alloc] initWithSource:YSGJS()
-                                                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                                     forMainFrameOnly:NO]];
-            [ucc addScriptMessageHandler:[YSGrab shared] name:@"ysgrab"];
-        }
-    } @catch (NSException *e) {}
+    YSGInjectIntoUCC(ucc);
     return ucc;
 }
 %end
@@ -607,16 +589,7 @@ static BOOL YSGIsVideoURL(NSString *url) {
             ucc = [[WKUserContentController alloc] init];
             configuration.userContentController = ucc;
         }
-        static NSHashTable *seen = nil;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ seen = [NSHashTable weakObjectsHashTable]; });
-        if (![seen containsObject:ucc]) {
-            [seen addObject:ucc];
-            [ucc addUserScript:[[WKUserScript alloc] initWithSource:YSGJS()
-                                                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                                                     forMainFrameOnly:NO]];
-            [ucc addScriptMessageHandler:[YSGrab shared] name:@"ysgrab"];
-        }
+        YSGInjectIntoUCC(ucc);
     } @catch (NSException *e) {}
     YSGSetupWindow();
     return %orig;
