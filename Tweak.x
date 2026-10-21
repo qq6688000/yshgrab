@@ -76,15 +76,27 @@ static void YSGAddLink(NSString *url, NSString *type) {
     if ((self = [super initWithFrame:f])) {
         self.backgroundColor = [UIColor clearColor];
         self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOpacity = 0.35;
-        self.layer.shadowRadius = 6;
-        self.layer.shadowOffset = CGSizeMake(0, 2);
+        self.layer.shadowOpacity = 0.18;
+        self.layer.shadowRadius = 4;
+        self.layer.shadowOffset = CGSizeMake(0, 1);
         UILabel *l = [[UILabel alloc] initWithFrame:self.bounds];
         l.text = @"⇩";
         l.textColor = [UIColor whiteColor];
         l.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
         l.textAlignment = NSTextAlignmentCenter;
         l.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        /* 文字阴影：浅色背景下白字也可见 */
+        NSShadow *sh = [NSShadow new];
+        sh.shadowColor = [UIColor blackColor];
+        sh.shadowOffset = CGSizeMake(0, 1);
+        sh.shadowBlurRadius = 2;
+        NSAttributedString *ats = [[NSAttributedString alloc] initWithString:@"⇩" attributes:@{
+            NSForegroundColorAttributeName: [UIColor whiteColor],
+            NSFontAttributeName: l.font,
+            NSShadowAttributeName: sh,
+            NSTextAlignmentAttributeName: @(NSTextAlignmentCenter)
+        }];
+        l.attributedText = ats;
         [self addSubview:l];
     }
     return self;
@@ -92,10 +104,11 @@ static void YSGAddLink(NSString *url, NSString *type) {
 - (void)drawRect:(CGRect)r {
     CGContextRef c = UIGraphicsGetCurrentContext();
     CGRect b = CGRectInset(self.bounds, 2, 2);
-    CGContextSetFillColorWithColor(c, [UIColor colorWithRed:0.09 green:0.55 blue:1.0 alpha:0.96].CGColor);
+    /* 填充透明：只留描边圆环 + 箭头 */
+    CGContextSetFillColorWithColor(c, [UIColor colorWithRed:0.09 green:0.55 blue:1.0 alpha:0.0].CGColor);
     CGContextFillEllipseInRect(c, b);
-    CGContextSetStrokeColorWithColor(c, [UIColor colorWithWhite:1 alpha:0.45].CGColor);
-    CGContextSetLineWidth(c, 1.2);
+    CGContextSetStrokeColorWithColor(c, [UIColor colorWithWhite:1 alpha:0.55].CGColor);
+    CGContextSetLineWidth(c, 1.5);
     CGContextStrokeEllipseInRect(c, b);
 }
 @end
