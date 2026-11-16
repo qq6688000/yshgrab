@@ -1,0 +1,33 @@
+workflows:
+  yshgrab-build:
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      osx: latest
+      xcode: 16.4
+      vars:
+        THEOS: $HOME/theos
+    scripts:
+      - name: Install deps
+        script: |
+          brew install dpkg ldid perl rsync || true
+      - name: Install Theos
+        script: |
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" || true
+          if [ ! -d "$HOME/theos" ]; then
+            git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          fi
+      - name: Download iOS SDK
+        script: |
+          if [ -z "$(ls "$HOME/theos"/sdks/*.sdk 2>/dev/null)" ]; then
+            git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks || true
+            cp -a /tmp/sdks/iPhoneOS*.sdk "$HOME/theos/sdks/" || true
+          fi
+          ls "$HOME/theos/sdks/"
+      - name: Build package
+        script: |
+          chmod +x build_package.sh postinst yshgrab
+          bash build_package.sh
+    artifacts:
+      - packages/*.deb
+      - build_package.log

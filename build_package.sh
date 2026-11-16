@@ -37,7 +37,7 @@ otool -l "$DYLIB" | grep -A2 LC_RPATH
 # 4. 生成 binary plist (30 bundles)
 python3 -c "
 import plistlib
-bundles = ['com.apple.mobilesafari','com.apple.SafariViewService','com.apple.WebSheet','com.apple.DocumentsApp','com.google.chrome.ios','org.mozilla.ios.Firefox','com.microsoft.edgemobile','com.brave.ios.Browser','com.alook.browser','com.quark.browser','com.ucweb.iphone.launcher','com.tencent.mtt','com.operasoftware.Opera','com.duckduckgo.mobile.ios','com.ss.iphone.ugc.Aweme','com.ss.iphone.ugc.Ame','com.zhiliaoapp.musically','com.dragon.read','com.jiangjia.gif','com.kuaishou.nebula','com.xingin.discover','com.sina.weibo','com.zhihu.ios','com.tencent.xin','com.tencent.mqq','tv.danmaku.bilianime','com.google.ios.youtube','com.tencent.live4iphone','com.iqiyi.iphone','com.youku.YouKu']
+bundles = ['com.apple.mobilesafari','com.apple.SafariViewService','com.apple.WebSheet','com.apple.DocumentsApp','com.google.chrome.ios','org.mozilla.ios.Firefox','com.microsoft.edgemobile','com.brave.ios.Browser','com.alook.browser','com.quark.browser','com.ucweb.iphone.launcher','com.tencent.mtt','com.operasoftware.Opera','com.duckduckgo.mobile.ios','com.ss.iphone.ugc.Aweme','com.ss.iphone.ugc.Ame','com.zhiliaoapp.musically','com.dragon.read','com.jiangjia.gif','com.kuaishou.nebula','com.xingin.discover','com.sina.weibo','com.zhihu.ios','com.tencent.xin','com.tencent.mqq','tv.danmaku.bilianime','com.google.ios.youtube','com.tencent.live4iphone','com.iqiyi.iphone','com.youku.YouKu','com.look.avbox']
 plistlib.dump({'Filter':{'Bundles':bundles}}, open('YSHGrab.plist','wb'), fmt=plistlib.FMT_BINARY)
 print('plist generated:', len(bundles), 'bundles')
 "
@@ -56,7 +56,7 @@ cp yshgrab "$ST/var/jb/usr/bin/yshgrab"
 chmod 755 "$ST/var/jb/usr/bin/yshgrab"
 
 mkdir -p packages
-OUT="packages/com.minis.yshgrab_1.4.0_iphoneos-arm64.deb"
+OUT="packages/com.minis.yshgrab_1.4.2_iphoneos-arm64.deb"
 dpkg-deb --build --root-owner-group "$ST" "$OUT"
 rm -rf "$ST"
 
