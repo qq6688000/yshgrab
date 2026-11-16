@@ -1,11 +1,11 @@
 Package: com.minis.yshgrab
 Name: YSHGrab
-Description: 悬浮球抓取网页/原生播放器视频链接（m3u8/mp4/mpd），支持 HLS 分片合并下载
+Description: 悬浮球抓取网页/原生播放器/libmpv-ffmpeg(media_kit) 视频链接，支持 HLS 分片合并下载
 Maintainer: Minis
 Author: Minis
 Section: Tweaks
 Depends: firmware (>= 15.0), ellekit | mobilesubstrate
 Tag: purpose::extension
 Architecture: iphoneos-arm64
-Version: 1.4.1
+Version: 1.4.2
 Installed-Size: 360

@@ -3,6 +3,8 @@
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 #import "YSGScript.h"
 
 // ================= 全局状态 =================
@@ -625,6 +627,18 @@ static void YSGInjectIntoUCC(WKUserContentController *ucc) {
     @try { if (YSGIsVideoURL(url.absoluteString)) YSGAddLink(url.absoluteString, @"urlsession-dl"); } @catch (NSException *e) {}
     return %orig;
 }
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+    @try { if (YSGIsVideoURL(request.URL.absoluteString)) YSGAddLink(request.URL.absoluteString, @"urlsession-req"); } @catch (NSException *e) {}
+    return %orig;
+}
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))ch {
+    @try { if (YSGIsVideoURL(request.URL.absoluteString)) YSGAddLink(request.URL.absoluteString, @"urlsession-reqcb"); } @catch (NSException *e) {}
+    return %orig;
+}
+- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request {
+    @try { if (YSGIsVideoURL(request.URL.absoluteString)) YSGAddLink(request.URL.absoluteString, @"urlsession-dlreq"); } @catch (NSException *e) {}
+    return %orig;
+}
 %end
 %end
 
@@ -660,6 +674,112 @@ static void YSGInjectIntoUCC(WKUserContentController *ucc) {
 %end
 %end
 
+// ================= 暮色 (Flutter + media_kit + libmpv) 视频源探测 =================
+// 暮色不走 WKWebView / AVPlayer / FSPlayer，视频流由 libmpv -> ffmpeg 直接拉，
+// 所以要 hook avformat_open_input / avio_open / mpv_command_string。
+static BOOL YSGIsVideoURL(NSString *url);   // 前向声明
+
+static void *YSGFindSymGlobal(const char *name) {
+    uint32_t ni = _dyld_image_count();
+    for (uint32_t i = 0; i < ni; i++) {
+        struct mach_header_64 *hdr = (struct mach_header_64 *)_dyld_get_image_header(i);
+        if (!hdr || hdr->magic != MH_MAGIC_64) continue;
+        uintptr_t slide = (uintptr_t)_dyld_get_image_vmaddr_slide(i);
+        struct load_command *lc = (struct load_command *)(hdr + 1);
+        struct symtab_command *sy = NULL;
+        struct section **secs = NULL;
+        uint32_t nsec = 0, cap = 0;
+        for (uint32_t k = 0; k < hdr->ncmds; k++) {
+            if (lc->cmd == LC_SYMTAB) {
+                sy = (struct symtab_command *)lc;
+            } else if (lc->cmd == LC_SEGMENT_64) {
+                struct segment_command_64 *sg = (struct segment_command_64 *)lc;
+                struct section *sp = (struct section *)(lc + 1);
+                for (uint32_t j = 0; j < sg->nsects; j++) {
+                    if (nsec == cap) {
+                        cap = cap ? cap * 2 : 16;
+                        secs = (struct section **)realloc(secs, cap * sizeof(void *));
+                    }
+                    secs[nsec++] = &sp[j];
+                }
+            }
+            lc = (struct load_command *)((uint8_t *)lc + lc->cmdsize);
+        }
+        if (!sy || sy->nsyms == 0 || nsec == 0) { free(secs); continue; }
+        struct nlist_64 *sym = (struct nlist_64 *)((uint8_t *)hdr + sy->symoff);
+        char *str = (char *)hdr + sy->stroff;
+        for (uint32_t s2 = 0; s2 < sy->nsyms; s2++) {
+            if ((sym[s2].n_type & 0xe) != N_SECT) continue;
+            int si = (int)sym[s2].n_sect - 1;
+            if (si < 0 || (uint32_t)si >= nsec) continue;
+            if (strcmp(str + sym[s2].n_value, name) != 0) continue;
+            void *r = (void *)(secs[si]->addr + slide + sym[s2].n_value);
+            free(secs);
+            return r;
+        }
+        free(secs);
+    }
+    return NULL;
+}
+
+static NSMutableSet<NSString *> *gProbeHooked;
+
+typedef struct AVFormatContext YSGAVFCtx;
+typedef int (*YSGAvfOpenFn)(YSGAVFCtx **, const char *, void *, void *);
+typedef int (*YSGAvioOpenFn)(void **, const char *, int);
+typedef int (*YSGMpvCmdFn)(void *, const char *);
+
+static YSGAvfOpenFn gOrigAvf = NULL;
+static YSGAvioOpenFn gOrigAvio = NULL;
+static YSGMpvCmdFn gOrigMpvCmd = NULL;
+
+static void YSGProbeLink(const char *tag, NSString *url) {
+    @try {
+        if (url.length && YSGIsVideoURL(url)) YSGAddLink(url, tag);
+    } @catch (NSException *e) {}
+}
+
+static int YSGHookAvf(YSGAVFCtx **ctx, const char *url, void *pd, void **opts) {
+    if (url) YSGProbeLink(@"ffmpeg", [NSString stringWithUTF8String:url]);
+    return gOrigAvf ? gOrigAvf(ctx, url, pd, opts) : -1;
+}
+static int YSGHookAvio(void **s, const char *url, int fl) {
+    if (url) YSGProbeLink(@"ffmpeg-io", [NSString stringWithUTF8String:url]);
+    return gOrigAvio ? gOrigAvio(s, url, fl) : -1;
+}
+static int YSGHookMpvCmd(void *ctx, const char *cmd) {
+    @try {
+        if (cmd) {
+            NSString *c = [NSString stringWithUTF8String:cmd];
+            NSRange r = [c rangeOfString:@"https?://" options:NSRegularExpressionSearch];
+            if (r.location != NSNotFound) {
+                NSString *rest = [c substringFromIndex:r.location];
+                NSArray *parts = [rest componentsSeparatedByCharactersInSet:
+                                 [NSCharacterSet characterSetWithCharactersInString:@" \\t\\n\"'"]];
+                NSString *u = parts.firstObject;
+                if (u.length > 12) YSGProbeLink(@"mpv", u);
+            }
+        }
+    } @catch (NSException *e) {}
+    return gOrigMpvCmd ? gOrigMpvCmd(ctx, cmd) : -1;
+}
+
+static void YSGProbeTryHook(NSString *tag, const char *name, void *repl, void **origSlot) {
+    if (!gProbeHooked) gProbeHooked = [NSMutableSet set];
+    if ([gProbeHooked containsObject:tag]) return;
+    void *sym = YSGFindSymGlobal(name);
+    if (!sym) { NSLog(@"[YSHGrab] probe miss: %@ (%s)", tag, name); return; }
+    MSHookFunction(sym, (void *)repl, (void **)origSlot);
+    [gProbeHooked addObject:tag];
+    NSLog(@"[YSHGrab] probe hooked: %@", tag);
+}
+
+static void YSGProbeInstall(void) {
+    YSGProbeTryHook(@"avformat", "avformat_open_input", (void *)YSGHookAvf, (void **)&gOrigAvf);
+    YSGProbeTryHook(@"avio", "avio_open", (void *)YSGHookAvio, (void **)&gOrigAvio);
+    YSGProbeTryHook(@"mpvcmd", "mpv_command_string", (void *)YSGHookMpvCmd, (void **)&gOrigMpvCmd);
+}
+
 %ctor {
     @try {
         YSGrab *g = [YSGrab shared];
@@ -668,6 +788,9 @@ static void YSGInjectIntoUCC(WKUserContentController *ucc) {
         %init(NSURLSessionGroup);
         if (NSClassFromString(@"AVURLAsset")) %init(AVGroup);
         if (NSClassFromString(@"FSPlayer")) %init(FSPGroup);
+        YSGProbeInstall();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^(void) { YSGProbeInstall(); });
         YSGWriteLoaded();
         YSGBuzz(1); // 1 下振动 = 插件已注入
         YSGSetupWindow();
